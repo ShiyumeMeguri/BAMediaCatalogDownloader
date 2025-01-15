@@ -91,6 +91,7 @@ namespace MediaCatalogDownloader
                 string cryptedValue = cryptedValueObj.ToString() ?? "";
                 byte[] siduKey2 = EncryptionUtils.CreateKey("ServerInfoDataUrl");
                 serverInfoDataUrl = EncryptionUtils.ConvertString(cryptedValue, siduKey2);
+                Console.WriteLine($"ServerInfoDataUrl: {serverInfoDataUrl}");
 
                 // Fetch and parse JSON data from serverInfoDataUrl
                 using HttpClient client = new HttpClient();
