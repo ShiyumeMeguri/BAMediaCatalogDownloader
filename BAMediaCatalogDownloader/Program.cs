@@ -1,4 +1,5 @@
-﻿using System.Collections.Concurrent;
+﻿using System.CommandLine;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Text;
 using GameMainConfigEncryption;
@@ -8,50 +9,69 @@ namespace MediaCatalogDownloader
 {
     class Program
     {
-        static async Task Main(string[] args)
+
+        static async Task<int> Main(string[] args)
         {
-            if (args.Length < 1)
+            // 必须的位置参数
+            var apkPathArgument = new Argument<string>("apkPath", "APK文件的路径");
+
+            // 可选参数
+            var outputDirectoryOption = new Option<string>(
+                new[] { "--outputDirectory", "-o" },
+                () => "BADownloadAsset",
+                "保存下载文件的目录");
+            var fileTypeOption = new Option<string>(
+                new[] { "--fileType", "-t" },
+                () => "None",
+                "要下载的文件类型 (Audio, Video, Texture 或 None)");
+
+            // 定义命令
+            var rootCommand = new RootCommand("MediaCatalogDownloader")
             {
-                Console.WriteLine("Usage: BlueArchiveAssetsDownloader [apkPath] [-o outputDirectory] [-t Audio|Video|Texture]");
-                Console.WriteLine("可以前往 https://d.apkpure.com/b/XAPK/com.YostarJP.BlueArchive?version=latest 下载最新版APK查找");
+                apkPathArgument,
+                outputDirectoryOption,
+                fileTypeOption
+            };
 
-                Console.WriteLine("按下任意键退出...");
-                Console.ReadKey();
-                return;
-            }
+            // 设置命令处理逻辑
+            rootCommand.SetHandler(
+                HandleCommand,
+                apkPathArgument,
+                outputDirectoryOption,
+                fileTypeOption);
 
-            string apkFilePath = args[0];
+            return await rootCommand.InvokeAsync(args);
+        }
 
-            if (!File.Exists(apkFilePath))
+        // 命令逻辑处理
+        static async Task HandleCommand(string apkPath, string outputDirectory, string fileType)
+        {
+            if (!File.Exists(apkPath))
             {
-                Console.WriteLine("APK file not found: " + apkFilePath);
+                Console.WriteLine($"错误：APK 文件未找到：{apkPath}");
                 return;
             }
 
             string serverInfoDataUrl = "";
             string version = "";
+
             try
             {
-                byte[] apkData = File.ReadAllBytes(apkFilePath);
+                byte[] apkData = File.ReadAllBytes(apkPath);
                 string targetString = "GameMainConfig";
                 byte[] targetBytes = Encoding.UTF8.GetBytes(targetString);
 
-                // Search for the target string in the APK data
                 int offset = FindBytes(apkData, targetBytes);
-
                 if (offset == -1)
                 {
-                    Console.WriteLine("Target string 'GameMainConfig' not found in APK.");
+                    Console.WriteLine("未在 APK 中找到目标字符串 'GameMainConfig'。");
                     return;
                 }
 
-                // Align to the next 4-byte boundary for size
-                int sizeOffset = offset + targetBytes.Length;
-                sizeOffset = (sizeOffset + 3) & ~3; // Align to 4-byte boundary
-
+                int sizeOffset = (offset + targetBytes.Length + 3) & ~3;
                 if (sizeOffset + 4 > apkData.Length)
                 {
-                    Console.WriteLine("Invalid size offset.");
+                    Console.WriteLine("无效的大小偏移量。");
                     return;
                 }
 
@@ -89,8 +109,7 @@ namespace MediaCatalogDownloader
 
                 // Decrypt the crypted value
                 string cryptedValue = cryptedValueObj.ToString() ?? "";
-                byte[] siduKey2 = EncryptionUtils.CreateKey("ServerInfoDataUrl");
-                serverInfoDataUrl = EncryptionUtils.ConvertString(cryptedValue, siduKey2);
+                serverInfoDataUrl = EncryptionUtils.ConvertString(cryptedValue, siduKey);
                 Console.WriteLine($"ServerInfoDataUrl: {serverInfoDataUrl}");
 
                 // Fetch and parse JSON data from serverInfoDataUrl
@@ -120,47 +139,23 @@ namespace MediaCatalogDownloader
             }
             catch (Exception ex)
             {
-                Console.WriteLine("An error occurred: " + ex.Message);
+                Console.WriteLine("发生错误：" + ex.Message);
             }
 
             string baseUrl = $"https://prod-clientpatch.bluearchiveyostar.com/{version}/MediaResources/";
             string catalogUrl = $"{baseUrl}MediaCatalog.bytes";
-            string downloadDirectory = "BADownloadAsset"; // Default download directory
-            MediaType fileTypeToDownload = MediaType.None; // Default to None
             byte[] catalogData = null;
+            MediaType fileTypeToDownload = Enum.TryParse(fileType, true, out MediaType parsedFileType) ? parsedFileType : MediaType.None;
 
             try
             {
-                if (args.Length > 1)
-                {
-                    for (int i = 1; i < args.Length; i++)
-                    {
-                        if (args[i] == "-o")
-                        {
-                            downloadDirectory = GetOutputDirectory(args, ref i);
-                            if (string.IsNullOrEmpty(downloadDirectory))
-                            {
-                                return;
-                            }
-                        }
-                        else if (args[i] == "-t")
-                        {
-                            fileTypeToDownload = GetFileType(args, ref i);
-                        }
-                    }
-                }
-
-                if (catalogData == null)
-                {
-                    Console.WriteLine($"Downloading catalog from: {catalogUrl}");
-                    catalogData = await DownloadBytesAsync(catalogUrl);
-                }
-
-                await ProcessCatalogData(catalogData, baseUrl, downloadDirectory, fileTypeToDownload);
+                Console.WriteLine($"从以下地址下载目录：{catalogUrl}");
+                catalogData = await DownloadBytesAsync(catalogUrl);
+                await ProcessCatalogData(catalogData, baseUrl, outputDirectory, fileTypeToDownload);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"An error occurred: {ex.Message}");
+                Console.WriteLine($"发生错误：{ex.Message}");
             }
         }
 
@@ -180,41 +175,6 @@ namespace MediaCatalogDownloader
                 if (found) return i;
             }
             return -1;
-        }
-
-        static string GetOutputDirectory(string[] args, ref int index)
-        {
-            if (index + 1 >= args.Length)
-            {
-                Console.WriteLine("Error: Please provide the output directory when using -o option.");
-                return null;
-            }
-
-            string outputDirectory = args[++index];
-            if (!Directory.Exists(outputDirectory))
-            {
-                Directory.CreateDirectory(outputDirectory);
-            }
-
-            return outputDirectory;
-        }
-
-        static MediaType GetFileType(string[] args, ref int index)
-        {
-            if (index + 1 >= args.Length)
-            {
-                Console.WriteLine("Error: Please provide the file type when using -t option.");
-                return MediaType.None;
-            }
-
-            string fileType = args[++index].ToLower();
-            return fileType switch
-            {
-                "audio" => MediaType.Audio,
-                "video" => MediaType.Video,
-                "texture" => MediaType.Texture,
-                _ => MediaType.None,
-            };
         }
 
         static async Task<byte[]> DownloadBytesAsync(string url)
